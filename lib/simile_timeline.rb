@@ -19,29 +19,73 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-class ActiveRecord::Base
-  def self.acts_as_simile_timeline_event(attr)
-    @@simile_timeline_fields = attr[:fields]
-
-    define_method(:to_simile_timeline_JSON_event) do
-      event = {}
-      @@simile_timeline_fields.each_pair do |field, value|
-        event[field] =
-          case value
-            when Symbol
-              self.send(value)
-            else
-              value
-          end
-          case event[field]
-            when Time
-              event[field] = event[field].iso8601
-          end
+module ActiveRecord
+  module Acts
+    module SimileTimeline
+      def self.included(base)
+        base.extend(ClassMethods)
+      end
+      
+      module ClassMethods
+        def acts_as_simile_timeline_event(attr)
+          @simile_timeline_fields = attr[:fields]
+          
+          include ActiveRecord::Acts::SimileTimeline::InstanceMethods        
         end
-      event.to_json
-    end
+        
+        def simile_timeline_fields
+          @simile_timeline_fields || self.superclass.instance_variable_get('@simile_timeline_fields')
+        end
+      end
+    
+      module InstanceMethods      
+        def to_simile_timeline_JSON_event
+          event = {}
+          self.class.simile_timeline_fields.each_pair do |field, value|
+            event[field] =
+              case value
+                when Symbol
+                  self.send(value)
+                when Proc
+                  value.call(self)
+                else
+                  value
+              end
+              case event[field]
+                when Time
+                  event[field] = event[field].iso8601
+              end
+            end
+          event.to_json    
+        end      
+      end
+    end   
   end
 end
+
+#class ActiveRecord::Base
+#  def self.acts_as_simile_timeline_event(attr)
+#    @@simile_timeline_fields = attr[:fields]
+#
+#    define_method(:to_simile_timeline_JSON_event) do
+#      event = {}
+#      @@simile_timeline_fields.each_pair do |field, value|
+#        event[field] =
+#          case value
+#            when Symbol
+#              self.send(value)
+#            else
+#              value
+#          end
+#          case event[field]
+#            when Time
+#              event[field] = event[field].iso8601
+#          end
+#        end
+#      event.to_json
+#    end
+#  end
+#end
 
 module Simile #:nodoc:
   module Timeline
@@ -57,6 +101,7 @@ module Simile #:nodoc:
         @highlights         = attrs[:highlight]
         @event_source       = attrs[:event_source]
         @event_band         = attrs[:event_band]
+        @decorators         = attrs[:decorators]
       end
 
       attr_reader :event_source
@@ -145,8 +190,9 @@ module Simile #:nodoc:
           bands_js,
           synchronization_js,
           highlight_js,
+          decorators_js,
           "#{js_id}=Timeline.create($('#{js_id}'),#{js_id}_bands);",
-          onscroll_js(event_source_url),
+          #onscroll_js(event_source_url),
           event_load_js(event_source_url),
           "};"
         ].join(SPLIT_CHAR)
@@ -238,6 +284,17 @@ module Simile #:nodoc:
         end
         out.join(SPLIT_CHAR)
       end
+      
+      def decorators_js
+        return "" if @decorators.nil?
+        
+        out = []
+        @decorators.each do |band, decorators|
+          decorators_collection = decorators.collect { |params| Decorator.build(params).js }
+          out << "#{js_id}_bands[#{@band_index[band]}].decorators=[#{decorators_collection.join(SPLIT_CHAR)}];"
+        end
+        out.join(SPLIT_CHAR)
+      end
 
       private :observers_js, :define_js, :onload_js, :onresize_js, :bands_js, :synchronization_js
 
@@ -267,6 +324,7 @@ module Simile #:nodoc:
     class Band < TimelineChild
       attr_accessor :timeline_js_id
       attr_accessor :width, :intervalPixels, :intervalUnit, :showEventText, :trackHeight, :trackGap, :date
+      attr_accessor :overview, :timeZone
 
       def timeline_js_id=(value)
         @eventSource = "#{value}_event_source"
@@ -293,7 +351,6 @@ module Simile #:nodoc:
       def theme=(theme_name)
         @theme = "#{theme_name}_theme"
       end
-
     end # end class Band
     class Theme < TimelineChild
       attr_accessor :firstDayOfWeek
@@ -333,6 +390,39 @@ module Simile #:nodoc:
     end
     class Marker < TimelineChild
       attr_accessor :hAlign, :hBottomStyler, :hBottomEmphasizedStyler, :hTopStyler, :hTopEmphasizedStyler, :vAlign, :vRightStyler, :vRightEmphasizedStyler, :vLeftStyler, :vLeftEmphasizedStyler
+    end
+    
+    class Decorator < TimelineChild
+      attr_accessor :opacity, :theme, :unit, :color
+      
+      def self.build(params)
+        ('::Simile::Timeline::' + (params.delete(:type).to_s + 'Decorator').classify).constantize.new(params)
+      end
+      
+      # returns JavaScript defining this decorator
+      def js
+        attributes = []
+        instance_values.each_pair do |attribute, value|
+          attributes << attribute.to_s + ":" + value.to_s if value
+        end
+
+        [ "new Timeline.#{self.class.to_s.demodulize}({",
+          attributes.join(","),
+          "})"
+        ].join(SPLIT_CHAR)
+      end
+      
+      def theme=(theme_name)
+        @theme = "#{theme_name}_theme"
+      end
+    end
+    
+    class PointHighlightDecorator < Decorator
+      attr_accessor :date, :width
+    end
+
+    class SpanHighlightDecorator < Decorator
+      attr_accessor :startDate, :endDate, :startLabel, :endLabel
     end
 
   end # end module Timeline
